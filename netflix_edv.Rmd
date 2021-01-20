@@ -1,0 +1,595 @@
+---
+title: "Netflix activity<br>with exploratory data visualizations"
+output: 
+  html_document:
+    toc: TRUE
+    toc_float: TRUE
+---
+
+This document explores your [Netflix](https://netflix.com) activity which you can request and download [here](https://www.netflix.com/account/getmyinfo). In particular, the processed data is that concerning only to information about the titles viewed by all the profiles in your Netflix account, so any personal data, account details or payment information is treated here. The analysis is also exploratory meaning that any interpretation of the results is given, but the set of visualizations shown here may strongly help you to determine interesting patterns.
+
+```{r setup, include=FALSE}
+# Default chunk options
+knitr::opts_chunk$set(echo = FALSE, 
+                      message = FALSE, 
+                      warning = FALSE, 
+                      fig.align = "center", 
+                      fig.width = 9, 
+                      fig.height = 5)
+```
+
+```{r packages}
+# File
+library(readr)
+
+# Data manipulation
+library(janitor)
+library(dplyr)
+library(forcats)
+
+# Date and time
+library(hms)
+library(lubridate)
+
+# Graphics
+library(ggplot2)
+library(circlize)
+library(patchwork)
+
+# Graphs
+library(igraph)
+library(ggnetwork)
+
+# Other
+library(scales)
+library(zoo)
+```
+
+```{r unzip}
+# Report unzipping to temporary folder
+unzip(zipfile = "data/netflix-report.zip", 
+      exdir = file.path(tempdir(), "netflix-report"))
+```
+
+```{r read_data}
+# Viewing activity from the report
+viewing <- read_delim(file = file.path(tempdir(), "netflix-report/Content_Interaction/ViewingActivity.csv"),
+                      delim = ",")
+
+# Convert column names to a clean format
+viewing <- clean_names(viewing)
+```
+
+```{r data_manipulation}
+# For the purpose of the report we only want 'real' content (without trailers nor other promotional content)
+viewing <- viewing %>% 
+  filter(is.na(supplemental_video_type)) %>% 
+  # 'date' feature from 'start_time'
+  mutate(date = as.Date(start_time, "%Y-%m-%d"))
+```
+
+<br>
+
+### History
+
+All the viewing history in hours a day. The moving average of the last 30 days is shown for better trend appreciation as this plot might look noisy:
+
+```{r profiles}
+# Profile names vector
+profiles <- viewing %>% 
+  select(profile_name) %>%
+  distinct() %>% 
+  unlist() %>% 
+  unname()
+```
+
+```{r dates_seq}
+# Sequence of all possible dates. It's used to make the moving average not
+# dependent of the last n data points but the last n dates
+all_dates <- seq(from = min(viewing$start_time), 
+                 to = max(viewing$start_time), 
+                 by = "1 days") %>% as.Date("%Y-%m-%d")
+
+all_dates <- expand.grid(profile_name = profiles, 
+                         date = all_dates) %>% 
+  bind_cols(duration = 0)
+```
+
+```{r history}
+# Daily viewing hours and 30-day moving average
+viewing %>% 
+  mutate(duration = as.integer(duration)) %>% 
+  select(profile_name, date, duration) %>% 
+  bind_rows(all_dates) %>% 
+  group_by(profile_name, date) %>% 
+  summarise(hours = as.integer(sum(duration)) / 3600) %>% 
+  mutate(roll_mean = rollapply(hours, 30, mean, align = "right", fill = NA)) %>% 
+  filter(hours > 0) %>% 
+  ggplot(aes(x = date, y = hours)) + 
+  geom_col(aes(fill = profile_name), width = 1, alpha = 0.6, show.legend = FALSE) + 
+  geom_point(aes(y = roll_mean), size = 0.1, show.legend = FALSE) + 
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) + 
+  scale_fill_brewer(palette = "Set1") + 
+  theme_bw() + 
+  labs(title = "Daily viewing hours (30-day moving average)", x = NULL, y = "Hours") + 
+  facet_wrap(profile_name~., ncol = 1, strip.position = "right")
+```
+
+<br>
+
+Cumulative viewing history:
+
+```{r cumulative_history}
+# Cumulative daily viewing hours
+viewing %>% 
+  group_by(profile_name, date) %>% 
+  summarise(hours = as.integer(sum(duration)) / 3600) %>% 
+  mutate(cum_hours = cumsum(hours)) %>%  
+  ggplot(aes(x = date, y = cum_hours)) + 
+  geom_area(aes(color = profile_name), size = 0.7, fill = NA, show.legend = FALSE) + 
+  geom_col(aes(fill = profile_name), width = 1, size = 1, alpha = 0.6, show.legend = FALSE) + 
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) + 
+  scale_fill_brewer(palette = "Set1") + 
+  scale_color_brewer(palette = "Set1") + 
+  theme_bw() + 
+  labs(title = "Cumulative daily viewing hours", x = NULL, y = "Hours") + 
+  facet_wrap(profile_name~., ncol = 1, strip.position = "right")
+```
+
+<br>
+
+Total viewing time:
+
+```{r parse_period_fun}
+# Function to parse a period class variable to '#d #h:#m'
+parse_period <- function(p) {
+  paste0(day(p), "d ", hour(p), "h:", minute(p), "m")
+}
+```
+
+```{r total_viewing, fig.height=3}
+# Total viewing hours by profile
+viewing %>% 
+  group_by(profile_name) %>% 
+  summarise(seconds = as.integer(sum(duration))) %>% 
+  mutate(hours = seconds / 3600, 
+         period = seconds_to_period(seconds)) %>% 
+  ggplot(aes(x = reorder(profile_name, desc(profile_name)), y = hours)) + 
+  geom_col(aes(fill = profile_name), alpha = 0.6, show.legend = FALSE) + 
+  geom_text(aes(label = paste0(round(hours, 1), " hours\n", parse_period(period))), hjust = 0, nudge_y = 10, size = 3) + 
+  scale_y_continuous(expand = expansion(mult = c(0, 0.2))) + 
+  scale_fill_brewer(palette = "Set1") + 
+  theme_classic() + 
+  theme(axis.line.x = element_blank(), axis.ticks.x = element_blank(), axis.text.x = element_blank()) + 
+  labs(title = "Total viewing time", x = NULL, y = NULL) + 
+  coord_flip()
+```
+
+<br>
+
+### By periods
+
+The distributions of the viewing activity for daily, weekly and monthly periods is shown with violin and box plots:
+
+```{r period_dist, fig.height=7}
+# Daily viewing hours
+pl_dens_1 <- viewing %>% 
+  group_by(profile_name, date) %>% 
+  summarise(hours = as.integer(sum(duration)) / 3600) %>% 
+  ggplot(aes(x = 0, y = hours)) + 
+  geom_violin(aes(fill = profile_name, color = profile_name), alpha = 0.6, show.legend = FALSE) + 
+  geom_boxplot(aes(color = profile_name), width = 0.2, outlier.shape = NA, fill = "white", show.legend = FALSE) + 
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) + 
+  scale_fill_brewer(palette = "Set1") + 
+  scale_color_brewer(palette = "Set1") + 
+  theme_bw() + 
+  theme(panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), axis.text.y = element_blank(), axis.ticks.y = element_blank()) +
+  labs(title = "Daily viewing hours", x = "Distribution", y = "Hours") + 
+  coord_flip() + 
+  facet_wrap(~profile_name, ncol = 1, strip.position = "right")
+
+# Weekly viewing hours
+pl_dens_2 <- viewing %>% 
+  mutate(week = format(as.Date(start_time, "%Y-%m-%d"), "%Y-%W")) %>% 
+  group_by(profile_name, week) %>% 
+  summarise(hours = as.integer(sum(duration)) / 3600) %>% 
+  ggplot(aes(x = 0, y = hours)) + 
+  geom_violin(aes(fill = profile_name, color = profile_name), alpha = 0.6, show.legend = FALSE) + 
+  geom_boxplot(aes(color = profile_name), width = 0.2, outlier.shape = NA, fill = "white", show.legend = FALSE) + 
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) + 
+  scale_fill_brewer(palette = "Set1") + 
+  scale_color_brewer(palette = "Set1") + 
+  theme_bw() + 
+  theme(panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), axis.text.y = element_blank(), axis.ticks.y = element_blank()) +
+  labs(title = "Weekly viewing hours", x = NULL, y = "Hours") + 
+  coord_flip() + 
+  facet_wrap(~profile_name, ncol = 1, strip.position = "right")
+
+# Monthly viewing hours
+pl_dens_3 <- viewing %>% 
+  mutate(month = format(as.Date(start_time, "%Y-%m-%d"), "%Y-%b")) %>% 
+  group_by(profile_name, month) %>% 
+  summarise(hours = as.integer(sum(duration)) / 3600) %>% 
+  ggplot(aes(x = 0, y = hours)) + 
+  geom_violin(aes(fill = profile_name, color = profile_name), alpha = 0.6, show.legend = FALSE) + 
+  geom_boxplot(aes(color = profile_name), width = 0.2, outlier.shape = NA, fill = "white", show.legend = FALSE) + 
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) + 
+  scale_fill_brewer(palette = "Set1") + 
+  scale_color_brewer(palette = "Set1") + 
+  theme_bw() + 
+  theme(panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), axis.text.y = element_blank(), axis.ticks.y = element_blank()) +
+  labs(title = "Monthly viewing hours", x = NULL, y = "Hours") + 
+  coord_flip() + 
+  facet_wrap(~profile_name, ncol = 1, strip.position = "right")
+
+pl_dens_1 | pl_dens_2 | pl_dens_3
+```
+
+**How to interpret?** The violin plot shows the probability density at different amount of hours while the box plot gives summary statistics. In particular, the box itself represents the interquartile range and the thick line inside is the median. The outliers aren't shown for better clarity and scaling along the horizontal axis.
+
+<br>
+
+### Days of the week
+
+The next visualizations give information about the activity throughout the week, allowing direct comparison of habits between viewers.
+
+```{r locale_settings, include=FALSE}
+# Save current locale
+system_locale <- Sys.getlocale(category = "LC_TIME")
+
+# Set time locale to english
+Sys.setlocale(category = "LC_TIME", locale = "en_US.UTF-8")
+```
+
+<br>
+
+Total hours by day of the week and its percentage:
+
+```{r days_week}
+# Viewing hours by day of the week
+pl_week_1 <- viewing %>% 
+  mutate(day_week = format(start_time, "%a")) %>% 
+  mutate(day_week = fct_relevel(day_week, c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))) %>% 
+  group_by(profile_name, day_week) %>% 
+  summarise(hours = as.integer(sum(duration)) / 3600) %>% 
+  ggplot(aes(x = day_week, y = hours)) + 
+  geom_line(aes(color = profile_name, group = profile_name), size = 1, alpha = 0.6) + 
+  geom_point(size = 3, color = "white") + 
+  geom_point(aes(color = profile_name), size = 2) + 
+  scale_color_brewer(palette = "Set1") + 
+  theme_classic() + 
+  theme(panel.grid.major.y = element_line(color = "lightgray"), panel.grid.minor.y = element_line(color = "lightgray")) + 
+  labs(title = "Total viewing hours by day of the week", x = NULL, y = "Hours", color = "Profile")
+
+# % of viewing hours by day of the week
+pl_week_2 <- viewing %>% 
+  mutate(day_week = format(start_time, "%a")) %>% 
+  mutate(day_week = fct_relevel(day_week, c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))) %>% 
+  group_by(profile_name, day_week) %>% 
+  summarise(hours = as.integer(sum(duration)) / 3600) %>% 
+  mutate(total_hours = sum(hours), 
+         pct_hours = hours / total_hours) %>% 
+  ggplot(aes(x = day_week, y = pct_hours)) + 
+  geom_line(aes(color = profile_name, group = profile_name), size = 1, alpha = 0.6) + 
+  geom_point(size = 3, color = "white") + 
+  geom_point(aes(color = profile_name), size = 2) + 
+  scale_y_continuous(labels = percent) + 
+  scale_color_brewer(palette = "Set1") + 
+  theme_classic() + 
+  theme(panel.grid.major.y = element_line(color = "lightgray"), panel.grid.minor.y = element_line(color = "lightgray")) + 
+  labs(title = "% of viewing hours by day of the week", x = NULL, y = "% of viewing", color = "Profile")
+
+(pl_week_1 / pl_week_2) + plot_layout(guides = "collect")
+```
+
+<br>
+
+A more advanced visualization shows the density of viewing hours by day of the week:
+
+```{r days_week_dens}
+# Density of viewing hours by day of the week
+viewing %>% 
+  mutate(weekday = format(start_time, "%a")) %>% 
+  mutate(weekday = fct_relevel(weekday, c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))) %>% 
+  group_by(profile_name, weekday) %>% 
+  summarise(hours = as.integer(duration) / 3600) %>% 
+  ggplot(aes(x = reorder(weekday, desc(weekday)), y = hours)) + 
+  geom_bin2d(binwidth = 2 / 60) + 
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) + 
+  scale_color_brewer(palette = "Set1") + 
+  scale_fill_viridis_c(na.value = "black") + 
+  theme_bw() + 
+  labs(title = "Density of viewing hours by day of the week", x = NULL, y = "Hours", fill = "Hours") + 
+  coord_flip() + 
+  facet_wrap(~ profile_name, ncol = 1, strip.position = "right")
+```
+
+```{r recover_locale, include=FALSE}
+Sys.setlocale(category = "LC_TIME", locale = system_locale)
+```
+
+<br>
+
+### Title duration
+
+The title duration distribution. Here the duration refers to the total time played, not the actual title length as this information isn't given in the data:
+
+```{r duration}
+# Duration distribution
+viewing %>% 
+  group_by(profile_name, title) %>% 
+  summarise(hours = as.integer(sum(duration)) / 3600) %>% 
+  ggplot(aes(x = 0, y = hours)) + 
+  geom_violin(aes(fill = profile_name, color = profile_name), alpha = 0.6, show.legend = FALSE) + 
+  geom_boxplot(aes(color = profile_name), width = 0.2, outlier.shape = NA, fill = "white", show.legend = FALSE) + 
+  scale_y_continuous(breaks = seq(0, 24, by = 1), expand = expansion(mult = c(0, 0.1))) + 
+  scale_fill_brewer(palette = "Set1") + 
+  scale_color_brewer(palette = "Set1") + 
+  theme_bw() + 
+  theme(panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), axis.text.y = element_blank(), axis.ticks.y = element_blank()) + 
+  labs(title = "Title duration", x = "Distribution", y = "Hours") + 
+  coord_flip() + 
+  facet_wrap(~profile_name, ncol = 1, strip.position = "right")
+```
+
+<br>
+
+### Concurrences
+
+Concurrent viewings are those which intervals overlap with other users viewings. These intervals are computed as the time lapse from the start time of a viewing until the end time given its duration. It's not about viewing the same title but about users viewing any content at the same time.
+
+```{r intervals}
+# Interval feature
+viewing_intervals <- viewing %>% 
+  mutate(interval = interval(start_time, start_time + duration)) %>% 
+  select(profile_name, start_time, duration, interval)
+
+# Interval concurrence (total or partial) matrix
+concurrence_mat <- sapply(viewing_intervals$interval, 
+                          function(x) int_overlaps(x, 
+                                                   viewing_intervals$interval))
+
+# Diagonal to FALSE
+diag(concurrence_mat) <- FALSE
+
+# New feature 'concurrence' T/F
+viewing$concurrence <- apply(concurrence_mat, 2, function(x) any(x))
+```
+
+```{r concurrences}
+# Concurrent viewings
+viewing_conc <- viewing %>% 
+  group_by(profile_name, concurrence) %>% 
+  summarise(hours = as.integer(sum(duration)) / 3600, 
+            hours = sum(hours)) %>% 
+  ungroup() %>% 
+  group_by(profile_name) %>% 
+  summarise(concurrence = concurrence, 
+            pct_hours = hours / sum(hours)) %>% 
+  ungroup()
+```
+
+<br>
+
+The portion of viewing time where a concurrence exists:
+
+```{r concurrences_plot, fig.height=3}
+# Concurrence portion
+viewing_conc %>% 
+  ggplot(aes(x = reorder(profile_name, desc(profile_name)), y = pct_hours)) + 
+  geom_col(fill = "gray50") + 
+  geom_col(data = viewing_conc %>% filter(concurrence), fill = "white") + 
+  geom_col(data = viewing_conc %>% filter(concurrence), aes(fill = profile_name), alpha = 0.6, show.legend = FALSE) + 
+  geom_text(data = viewing_conc %>% filter(concurrence), aes(label = paste0(format(round(pct_hours, 3) * 100, nsmall = 1), "%")), hjust = 0, nudge_y = 0.01, size = 3.5) + 
+  scale_y_continuous(labels = percent, expand = expansion(mult = c(0, 0.05))) + 
+  scale_fill_brewer(palette = "Set1") + 
+  theme_classic() + 
+  theme(axis.line.x = element_blank()) + 
+  labs(title = "% of concurrent viewings", x = NULL, y = "% of viewing") + 
+  coord_flip()
+```
+
+<br>
+
+The next three plots show the pattern of viewing intervals where other viewers are also active.
+
+Only for concurrent viewings, the viewing distribution by time of day:
+
+```{r concurrence_dist}
+# Concurrence density by hour
+viewing %>% 
+    filter(concurrence) %>% 
+    mutate(time = as.POSIXct(paste("2000-01-01", strftime(start_time, format = "%H:%M:%S", tz = "UTC")))) %>% 
+    ggplot(aes(x = 0, y = time)) + 
+    geom_violin(aes(fill = profile_name, color = profile_name), alpha = 0.6, show.legend = FALSE) + 
+    geom_boxplot(aes(color = profile_name), width = 0.2, outlier.shape = NA, fill = "white", show.legend = FALSE) + 
+    scale_y_datetime(date_labels = "%H:%M", breaks = seq(from = as.POSIXlt("2000-01-01 00:00:00"), to = as.POSIXlt("2000-01-02 00:00:00"), by = "3 hours"), date_minor_breaks = "1 hours") + 
+    scale_fill_brewer(palette = "Set1") + 
+    scale_color_brewer(palette = "Set1") + 
+    theme_bw() + 
+    theme(panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank(), axis.text.y = element_blank(), axis.ticks.y = element_blank()) + 
+    labs(title = "Concurrence by time of day", x = "Distribution", y = NULL) + 
+    coord_flip() + 
+    facet_wrap(~profile_name, ncol = 1, strip.position = "right")
+```
+
+<br>
+
+Expressed in percentage in intervals of 30 minutes:
+
+```{r concurrence_pct}
+# Concurrent viewings %
+viewing %>% 
+  filter(concurrence) %>% 
+  mutate(time = as.POSIXct(paste("2000-01-01", strftime(start_time, format = "%H:%M:%S", tz = "UTC")))) %>% 
+  mutate(time_breaks = as.POSIXct(cut(time + hms::hms(1800), breaks = "30 min"))) %>% # +30 min to shift to the right the values
+  group_by(profile_name, time_breaks) %>% 
+  summarise(hours = as.integer(sum(duration)) / 3600) %>% 
+  mutate(total_hours = sum(hours), 
+         pct_hours = hours / total_hours) %>% 
+  ggplot(aes(x = time_breaks, y = pct_hours)) + 
+  geom_area(aes(fill = profile_name, color = profile_name), size = 1, alpha = 0.6, show.legend = FALSE) + 
+  scale_x_datetime(date_labels = "%H:%M", breaks = seq(from = as.POSIXlt("2000-01-01 00:00:00"), to = as.POSIXlt("2000-01-02 00:00:00"), by = "3 hours"), date_minor_breaks = "1 hours") + 
+  scale_y_continuous(labels = percent, expand = expansion(mult = c(0, 0.1))) + 
+  scale_fill_brewer(palette = "Set1") + 
+  scale_color_brewer(palette = "Set1") + 
+  theme_bw() + 
+  labs(title = "% of concurrence by time of day (30-minute intervals)", x = NULL, y = "% of concurrence") + 
+  facet_wrap(~profile_name, ncol = 1, strip.position = "right")
+```
+
+<br>
+
+Total percentage in intervals of 30 minutes:
+
+```{r concurrence_tot, fig.height=3}
+# Total concurrent viewings
+viewing %>% 
+  filter(concurrence) %>% 
+  mutate(time = as.POSIXct(paste("2000-01-01", strftime(start_time, format = "%H:%M:%S", tz = "UTC")))) %>% 
+  mutate(time_breaks = as.POSIXct(cut(time + hms::hms(1800), breaks = "30 min"))) %>% 
+  count(time_breaks, sort = TRUE) %>% 
+  mutate(pct = n / sum(n)) %>% 
+  ggplot(aes(x = time_breaks, y = pct)) + 
+  geom_area(size = 1, color = "black", alpha = 0.8, show.legend = FALSE) + 
+  scale_x_datetime(date_labels = "%H:%M", breaks = seq(from = as.POSIXlt("2000-01-01 00:00:00"), to = as.POSIXlt("2000-01-02 00:00:00"), by = "3 hours"), date_minor_breaks = "1 hours") + 
+  scale_y_continuous(labels = percent, expand = expansion(mult = c(0, 0.1))) + 
+  scale_fill_brewer(palette = "Set1") + 
+  scale_color_brewer(palette = "Set1") + 
+  theme_classic() + 
+  theme(panel.grid.major.y = element_line(color = "lightgray"), panel.grid.minor.y = element_line(color = "lightgray")) + 
+  labs(title = "% of concurrence by time of day (30-minute intervals)", x = NULL, y = "% of concurrence")
+```
+
+<br>
+
+Still considering only concurrent viewings, the portion of time that viewers overlap each other:
+
+```{r concurrence_relationships}
+# Profile colors table
+profile_colors <- tibble(profile_name = profiles %>% sort(), 
+                         color = brewer_pal(palette = "Set1")(length(profiles)))
+
+# All possible profile combinations
+pairs_conc <- expand.grid(profiles, 
+                          profiles, 
+                          stringsAsFactors = FALSE)
+
+pct_concurrence <- apply(pairs_conc, 1, function(x) {
+  viewing_pair <- viewing_intervals %>% 
+    filter(profile_name %in% c(x["Var1"], x["Var2"]))
+  
+  concurrence_mat <- sapply(viewing_pair$interval, 
+                            function(x) int_overlaps(x, viewing_pair$interval))
+  
+  diag(concurrence_mat) <- FALSE
+  
+  viewing_pair$concurrence <- apply(concurrence_mat, 2, function(x) any(x))
+  
+  viewing_pair %>% 
+    group_by(profile_name, concurrence) %>% 
+    summarise(hours = as.integer(sum(duration)) / 3600) %>% 
+    ungroup() %>% 
+    group_by(profile_name) %>% 
+    summarise(concurrence = concurrence, 
+              pct_hours = hours / sum(hours)) %>% 
+    filter(concurrence, profile_name == x["Var1"]) %>% 
+    {.$pct_hours}
+})
+
+pct_concurrence[sapply(pct_concurrence, length) == 0] <- 0
+
+pairs_conc <- pairs_conc %>% 
+  bind_cols(pct_concurrence = as.numeric(pct_concurrence))
+```
+
+```{r conc_relationships_plot, fig.height=9}
+# Chord diagram
+chordDiagram(pairs_conc %>% arrange(Var1), 
+             grid.col = profile_colors$color, 
+             scale = TRUE, 
+             link.border = "gray50")
+
+title("Concurrence relationships")
+```
+
+**How to interpret?** Look at a viewer's sector and its assigned color. The strips of the same color indicate the portion of time this user overlaps with others. Otherwise, the strips of different color indicate the portion of time other users overlap with this.
+
+<br>
+
+### Common interests
+
+A graph where each node represents a title is constructed. The node distribution, given by a force-directed algorithm, shows a qualitative measure of common interests among viewers:
+
+```{r titles_graph_construction}
+# Unique profile-title combinations
+profile_title <- viewing %>% 
+  select(profile_name, title) %>% 
+  distinct()
+
+# Title pairs and common profile
+titles <- merge(profile_title, 
+                profile_title, 
+                by = "profile_name") %>% 
+  select(2, 3, 1)
+
+# Limited to 2M combinations. Adjust this value if you have enough RAM.
+if (nrow(titles) > 2000000) {
+  # A sample of 2M combinations
+titles_sam <- sample_n(tbl = titles, size = 2000000)
+} else {
+  titles_sam <- titles
+}
+
+# Graph construction
+graph <- graph.data.frame(titles_sam, directed = FALSE)
+
+# Simplification
+graph <- simplify(graph, 
+                  remove.multiple = TRUE, 
+                  remove.loops = TRUE, 
+                  edge.attr.comb = "max")
+
+# Layout
+set.seed(123)
+layout <- layout_with_fr(graph)
+
+# Graph to dataframe
+graph_df <- ggnetwork(graph, layout = layout)
+```
+
+```{r titles_graph, fig.height=9}
+# Graph
+graph_df %>% 
+  filter(!is.na(profile_name)) %>% 
+  ggplot(aes(x, y)) + 
+  geom_nodes(aes(fill = profile_name), shape = 21, size = 3, color = "white", alpha = 0.6) + 
+  scale_fill_brewer(palette = "Set1") + 
+  theme_void() + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  labs(title = "Titles distribution", fill = "Profile") + 
+  theme(aspect.ratio = 1)
+```
+
+The plot above is translated into percentages such that the proportions of shared titles are given:
+
+```{r interests_pct}
+# % of shared titles
+merge(viewing %>% select(title, profile_name) %>% distinct(), 
+      viewing %>% select(title, profile_name) %>% distinct(), 
+      by = "title") %>% 
+  count(profile_name.x, profile_name.y) %>% 
+  group_by(profile_name.x) %>% 
+  summarise(profile_name.y = profile_name.y, n = n, pct = n / sum(n)) %>% 
+  mutate(note = ifelse(profile_name.x == profile_name.y, "*", "")) %>% 
+  ggplot(aes(x = reorder(profile_name.y, desc(profile_name.y)), y = pct)) + 
+  geom_col(aes(fill = profile_name.y), position = position_dodge(), alpha = 0.6, show.legend = FALSE) + 
+  geom_text(aes(label = paste0(format(round(pct, 3) * 100, nsmall = 1), "% ", note)), hjust = 0, nudge_y = 0.01, size = 3) + 
+  scale_y_continuous(breaks = seq(0, 1, by = 0.25), labels = percent, expand = expansion(mult = c(0, 0.2))) + 
+  scale_fill_brewer(palette = "Set1") + 
+  theme_bw() + 
+  theme(panel.grid.major.y = element_blank()) + 
+  labs(title = "Shared titles", x = "Sharing with", y = NULL, caption = "* % of titles not shared. Exclusive interests.") + 
+  coord_flip() + 
+  facet_wrap(~profile_name.x, ncol = 1, strip.position = "right")
+```
